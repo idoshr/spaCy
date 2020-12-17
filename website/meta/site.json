@@ -14,7 +14,6 @@
         "github": "explosion"
     },
     "theme": "#09a3d5",
-    "analytics": "UA-58931649-1",
     "newsletter": {
         "user": "spacy.us12",
         "id": "83b0498b1e7fa3c91ce68c3f1",
@@ -45,20 +44,23 @@
             "items": [
                 { "text": "Usage", "url": "/usage" },
                 { "text": "Models", "url": "/models" },
-                { "text": "API", "url": "/api" },
-                { "text": "Universe", "url": "/universe" }
+                { "text": "API Reference", "url": "/api" },
+                { "text": "Online Course", "url": "https://course.spacy.io" }
             ]
         },
         {
-            "label": "Support",
+            "label": "Community",
             "items": [
+                { "text": "Universe", "url": "/universe" },
+                {
+                    "text": "GitHub Discussions",
+                    "url": "https://github.com/explosion/spaCy/discussions"
+                },
                 { "text": "Issue Tracker", "url": "https://github.com/explosion/spaCy/issues" },
                 {
                     "text": "Stack Overflow",
                     "url": "http://stackoverflow.com/questions/tagged/spacy"
-                },
-                { "text": "Reddit User Group", "url": "https://www.reddit.com/r/spacynlp/" },
-                { "text": "Gitter Chat", "url": "https://gitter.im/explosion/spaCy" }
+                }
             ]
         },
         {

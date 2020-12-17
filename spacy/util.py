@@ -648,7 +648,7 @@ def filter_spans(spans):
         # Check for end - 1 here because boundaries are inclusive
         if span.start not in seen_tokens and span.end - 1 not in seen_tokens:
             result.append(span)
-        seen_tokens.update(range(span.start, span.end))
+            seen_tokens.update(range(span.start, span.end))
     result = sorted(result, key=lambda span: span.start)
     return result
 
@@ -838,6 +838,13 @@ class SimpleFrozenDict(dict):
 
 
 class DummyTokenizer(object):
+    def __call__(self, text):
+        raise NotImplementedError
+
+    def pipe(self, texts, **kwargs):
+        for text in texts:
+            yield self(text)
+
     # add dummy methods for to_bytes, from_bytes, to_disk and from_disk to
     # allow serialization (see #1557)
     def to_bytes(self, **kwargs):

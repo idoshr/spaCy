@@ -384,7 +384,6 @@ $ python -m spacy train [lang] [output_path] [train_path] [dev_path]
 | `--conv-depth`, `-cd` <Tag variant="new">2.2.4</Tag>            | option        | Depth of CNN layers of `Tok2Vec` component.                                                                                                                       |
 | `--cnn-window`, `-cW` <Tag variant="new">2.2.4</Tag>            | option        | Window size for CNN layers of `Tok2Vec` component.                                                                                                                |
 | `--cnn-pieces`, `-cP` <Tag variant="new">2.2.4</Tag>            | option        | Maxout size for CNN layers of `Tok2Vec` component.                                                                                                                |
-| `--use-chars`, `-chr` <Tag variant="new">2.2.4</Tag>            | flag          | Whether to use character-based embedding of `Tok2Vec` component.                                                                                                  |
 | `--bilstm-depth`, `-lstm` <Tag variant="new">2.2.4</Tag>        | option        | Depth of BiLSTM layers of `Tok2Vec` component (requires PyTorch).                                                                                                 |
 | `--embed-rows`, `-er` <Tag variant="new">2.2.4</Tag>            | option        | Number of embedding rows of `Tok2Vec` component.                                                                                                                  |
 | `--noise-level`, `-nl`                                          | option        | Float indicating the amount of corruption for data augmentation.                                                                                                  |
@@ -445,7 +444,8 @@ an approximate language-modeling objective. Specifically, we load pretrained
 vectors, and train a component like a CNN, BiLSTM, etc to predict vectors which
 match the pretrained ones. The weights are saved to a directory after each
 epoch. You can then pass a path to one of these pretrained weights files to the
-`spacy train` command.
+`spacy train` command. You can try to use a few with low `Loss` values reported
+in the output.
 
 This technique may be especially helpful if you have little labelled data.
 However, it's still quite experimental, so your mileage may vary. To load the
