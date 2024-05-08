@@ -1,11 +1,7 @@
-# coding: utf8
-from __future__ import unicode_literals
-
 import re
 
-from .char_classes import ALPHA_LOWER, ALPHA
-from ..symbols import ORTH, POS, TAG, LEMMA, SPACE
-
+from ..symbols import NORM, ORTH
+from .char_classes import ALPHA_LOWER
 
 # URL validation regex courtesy of: https://mathiasbynens.be/demo/url-regex
 # and https://gist.github.com/dperini/729294 (Diego Perini, MIT License)
@@ -37,13 +33,13 @@ URL_PATTERN = (
     r"|"
     # host & domain names
     # mods: match is case-sensitive, so include [A-Z]
-      "(?:"  # noqa
-        "(?:"
-          "[A-Za-z0-9\u00a1-\uffff]"
-          "[A-Za-z0-9\u00a1-\uffff_-]{0,62}"
-        ")?"
-        "[A-Za-z0-9\u00a1-\uffff]\."
-      ")+"
+    r"(?:"  # noqa: E131
+      r"(?:"  # noqa: E131
+        r"[A-Za-z0-9\u00a1-\uffff]"  # noqa: E131
+        r"[A-Za-z0-9\u00a1-\uffff_-]{0,62}"
+      r")?"
+      r"[A-Za-z0-9\u00a1-\uffff]\."
+    r")+"
     # TLD identifier
     # mods: use ALPHA_LOWER instead of a wider range so that this doesn't match
     # strings like "lower.Upper", which can be split on "." by infixes in some
@@ -58,7 +54,6 @@ URL_PATTERN = (
     # fmt: on
 ).strip()
 
-TOKEN_MATCH = None
 URL_MATCH = re.compile("(?u)" + URL_PATTERN).match
 
 
@@ -66,13 +61,13 @@ BASE_EXCEPTIONS = {}
 
 
 for exc_data in [
-    {ORTH: " ", POS: SPACE, TAG: "_SP"},
-    {ORTH: "\t", POS: SPACE, TAG: "_SP"},
-    {ORTH: "\\t", POS: SPACE, TAG: "_SP"},
-    {ORTH: "\n", POS: SPACE, TAG: "_SP"},
-    {ORTH: "\\n", POS: SPACE, TAG: "_SP"},
+    {ORTH: " "},
+    {ORTH: "\t"},
+    {ORTH: "\\t"},
+    {ORTH: "\n"},
+    {ORTH: "\\n"},
     {ORTH: "\u2014"},
-    {ORTH: "\u00a0", POS: SPACE, LEMMA: "  ", TAG: "_SP"},
+    {ORTH: "\u00a0", NORM: "  "},
 ]:
     BASE_EXCEPTIONS[exc_data[ORTH]] = [exc_data]
 
@@ -128,11 +123,12 @@ emoticons = set(
 (-:
 =)
 (=
-")
 :]
 :-]
 [:
 [-:
+[=
+=]
 :o)
 (o:
 :}
@@ -164,6 +160,8 @@ emoticons = set(
 =|
 :|
 :-|
+]=
+=[
 :1
 :P
 :-P
@@ -251,3 +249,9 @@ o.0
 
 for orth in emoticons:
     BASE_EXCEPTIONS[orth] = [{ORTH: orth}]
+
+
+# Moved from a suffix setting due to #9155 removing prefixes from consideration
+# for lookbehinds
+for u in "cfkCFK":
+    BASE_EXCEPTIONS[f"°{u}."] = [{ORTH: "°"}, {ORTH: f"{u}"}, {ORTH: "."}]

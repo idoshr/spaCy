@@ -1,33 +1,44 @@
 # cython: infer_types=True
-# coding: utf8
-from __future__ import unicode_literals
-
-from libc.string cimport memcpy
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
+# cython: profile=False
 # Compiler crashes on memory view coercion without this. Should report bug.
-from cython.view cimport array as cvarray
 cimport numpy as np
+
 np.import_array()
 
-import numpy
 import warnings
-from thinc.neural.util import get_array_module
 
-from ..typedefs cimport hash_t
+from thinc.api import get_array_module
+
+from ..attrs cimport (
+    IS_ALPHA,
+    IS_ASCII,
+    IS_BRACKET,
+    IS_CURRENCY,
+    IS_DIGIT,
+    IS_LEFT_PUNCT,
+    IS_LOWER,
+    IS_PUNCT,
+    IS_QUOTE,
+    IS_RIGHT_PUNCT,
+    IS_SPACE,
+    IS_STOP,
+    IS_TITLE,
+    IS_UPPER,
+    LIKE_EMAIL,
+    LIKE_NUM,
+    LIKE_URL,
+    ORTH,
+)
 from ..lexeme cimport Lexeme
-from ..attrs cimport IS_ALPHA, IS_ASCII, IS_DIGIT, IS_LOWER, IS_PUNCT, IS_SPACE
-from ..attrs cimport IS_BRACKET, IS_QUOTE, IS_LEFT_PUNCT, IS_RIGHT_PUNCT
-from ..attrs cimport IS_TITLE, IS_UPPER, IS_CURRENCY, LIKE_URL, LIKE_NUM, LIKE_EMAIL
-from ..attrs cimport IS_STOP, ID, ORTH, NORM, LOWER, SHAPE, PREFIX, SUFFIX
-from ..attrs cimport LENGTH, CLUSTER, LEMMA, POS, TAG, DEP
 from ..symbols cimport conj
+from ..typedefs cimport hash_t
+from .doc cimport set_children_from_heads
+from .morphanalysis cimport MorphAnalysis
 
 from .. import parts_of_speech
-from .. import util
-from ..compat import is_config
+from ..attrs import IOB_STRINGS
 from ..errors import Errors, Warnings
 from .underscore import Underscore, get_ext_args
-from .morphanalysis cimport MorphAnalysis
 
 
 cdef class Token:
@@ -40,7 +51,7 @@ cdef class Token:
     def set_extension(cls, name, **kwargs):
         """Define a custom attribute which becomes available as `Token._`.
 
-        name (unicode): Name of the attribute to set.
+        name (str): Name of the attribute to set.
         default: Optional default value of the attribute.
         getter (callable): Optional getter function.
         setter (callable): Optional setter function.
@@ -58,7 +69,7 @@ cdef class Token:
     def get_extension(cls, name):
         """Look up a previously registered extension by name.
 
-        name (unicode): Name of the extension.
+        name (str): Name of the extension.
         RETURNS (tuple): A `(default, method, getter, setter)` tuple.
 
         DOCS: https://spacy.io/api/token#get_extension
@@ -69,7 +80,7 @@ cdef class Token:
     def has_extension(cls, name):
         """Check whether an extension has been registered.
 
-        name (unicode): Name of the extension.
+        name (str): Name of the extension.
         RETURNS (bool): Whether the extension has been registered.
 
         DOCS: https://spacy.io/api/token#has_extension
@@ -80,7 +91,7 @@ cdef class Token:
     def remove_extension(cls, name):
         """Remove a previously registered extension.
 
-        name (unicode): Name of the extension.
+        name (str): Name of the extension.
         RETURNS (tuple): A `(default, method, getter, setter)` tuple of the
             removed extension.
 
@@ -123,24 +134,25 @@ cdef class Token:
         return self.text.encode('utf8')
 
     def __str__(self):
-        if is_config(python3=True):
-            return self.__unicode__()
-        return self.__bytes__()
+        return self.__unicode__()
 
     def __repr__(self):
         return self.__str__()
 
-    def __richcmp__(self, Token other, int op):
+    def __richcmp__(self, object other, int op):
         # http://cython.readthedocs.io/en/latest/src/userguide/special_methods.html
         if other is None:
             if op in (0, 1, 2):
                 return False
             else:
                 return True
+        if not isinstance(other, Token):
+            return False
+        cdef Token other_token = other
         cdef Doc my_doc = self.doc
-        cdef Doc other_doc = other.doc
+        cdef Doc other_doc = other_token.doc
         my = self.idx
-        their = other.idx
+        their = other_token.idx
         if op == 0:
             return my < their
         elif op == 2:
@@ -205,24 +217,65 @@ cdef class Token:
         """
         if "similarity" in self.doc.user_token_hooks:
             return self.doc.user_token_hooks["similarity"](self, other)
-        if hasattr(other, "__len__") and len(other) == 1 and hasattr(other, "__getitem__"):
-            if self.c.lex.orth == getattr(other[0], "orth", None):
+        attr = getattr(self.doc.vocab.vectors, "attr", ORTH)
+        cdef Token this_token = self
+        cdef Token other_token
+        cdef Lexeme other_lex
+        if isinstance(other, Token):
+            other_token = other
+            if Token.get_struct_attr(this_token.c, attr) == Token.get_struct_attr(other_token.c, attr):
                 return 1.0
-        elif hasattr(other, "orth"):
-            if self.c.lex.orth == other.orth:
+        elif isinstance(other, Lexeme):
+            other_lex = other
+            if Token.get_struct_attr(this_token.c, attr) == Lexeme.get_struct_attr(other_lex.c, attr):
                 return 1.0
         if self.vocab.vectors.n_keys == 0:
             warnings.warn(Warnings.W007.format(obj="Token"))
         if self.vector_norm == 0 or other.vector_norm == 0:
-            warnings.warn(Warnings.W008.format(obj="Token"))
+            if not self.has_vector or not other.has_vector:
+                warnings.warn(Warnings.W008.format(obj="Token"))
             return 0.0
         vector = self.vector
         xp = get_array_module(vector)
-        return (xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm))
+        result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
+        # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
+        return result.item()
+
+    def has_morph(self):
+        """Check whether the token has annotated morph information.
+        Return False when the morph annotation is unset/missing.
+
+        RETURNS (bool): Whether the morph annotation is set.
+        """
+        return not self.c.morph == 0
 
     @property
     def morph(self):
         return MorphAnalysis.from_id(self.vocab, self.c.morph)
+
+    @morph.setter
+    def morph(self, MorphAnalysis morph):
+        # Check that the morph has the same vocab
+        if self.vocab != morph.vocab:
+            raise ValueError(Errors.E1013)
+        self.c.morph = morph.c.key
+
+    def set_morph(self, features):
+        cdef hash_t key
+        if features is None:
+            self.c.morph = 0
+        elif isinstance(features, MorphAnalysis):
+            self.morph = features
+        else:
+            if isinstance(features, int):
+                features = self.vocab.strings[features]
+            key = self.vocab.morphology.add(features)
+            self.c.morph = key
+
+    @property
+    def lex(self):
+        """RETURNS (Lexeme): The underlying lexeme."""
+        return self.vocab[self.c.lex.orth]
 
     @property
     def lex_id(self):
@@ -236,21 +289,16 @@ cdef class Token:
         return self.c.lex.id
 
     @property
-    def string(self):
-        """Deprecated: Use Token.text_with_ws instead."""
-        return self.text_with_ws
-
-    @property
     def text(self):
-        """RETURNS (unicode): The original verbatim text of the token."""
+        """RETURNS (str): The original verbatim text of the token."""
         return self.orth_
 
     @property
     def text_with_ws(self):
-        """RETURNS (unicode): The text content of the span (with trailing
+        """RETURNS (str): The text content of the span (with trailing
             whitespace).
         """
-        cdef unicode orth = self.vocab.strings[self.c.lex.orth]
+        cdef str orth = self.vocab.strings[self.c.lex.orth]
         if self.c.spacy:
             return orth + " "
         else:
@@ -312,7 +360,7 @@ cdef class Token:
     @property
     def shape(self):
         """RETURNS (uint64): ID of the token's shape, a transform of the
-            tokens's string, to show orthographic features (e.g. "Xxxx", "dd").
+            token's string, to show orthographic features (e.g. "Xxxx", "dd").
         """
         return self.c.lex.shape
 
@@ -330,43 +378,43 @@ cdef class Token:
         """
         return self.c.lex.suffix
 
-    property lemma:
+    @property
+    def lemma(self):
         """RETURNS (uint64): ID of the base form of the word, with no
             inflectional suffixes.
         """
-        def __get__(self):
-            if self.c.lemma == 0:
-                lemma_ = self.vocab.morphology.lemmatizer.lookup(self.orth_, orth=self.orth)
-                return self.vocab.strings[lemma_]
-            else:
-                return self.c.lemma
+        return self.c.lemma
 
-        def __set__(self, attr_t lemma):
-            self.c.lemma = lemma
+    @lemma.setter
+    def lemma(self, attr_t lemma):
+        self.c.lemma = lemma
 
-    property pos:
+    @property
+    def pos(self):
         """RETURNS (uint64): ID of coarse-grained part-of-speech tag."""
-        def __get__(self):
-            return self.c.pos
+        return self.c.pos
 
-        def __set__(self, pos):
-            self.c.pos = pos
+    @pos.setter
+    def pos(self, pos):
+        self.c.pos = pos
 
-    property tag:
+    @property
+    def tag(self):
         """RETURNS (uint64): ID of fine-grained part-of-speech tag."""
-        def __get__(self):
-            return self.c.tag
+        return self.c.tag
 
-        def __set__(self, attr_t tag):
-            self.vocab.morphology.assign_tag(self.c, tag)
+    @tag.setter
+    def tag(self, attr_t tag):
+        self.c.tag = tag
 
-    property dep:
+    @property
+    def dep(self):
         """RETURNS (uint64): ID of syntactic dependency label."""
-        def __get__(self):
-            return self.c.dep
+        return self.c.dep
 
-        def __set__(self, attr_t label):
-            self.c.dep = label
+    @dep.setter
+    def dep(self, attr_t label):
+        self.c.dep = label
 
     @property
     def has_vector(self):
@@ -381,7 +429,7 @@ cdef class Token:
             return self.doc.user_token_hooks["has_vector"](self)
         if self.vocab.vectors.size == 0 and self.doc.tensor.size != 0:
             return True
-        return self.vocab.has_vector(self.c.lex.orth)
+        return self.vocab.has_vector(Token.get_struct_attr(self.c, self.vocab.vectors.attr))
 
     @property
     def vector(self):
@@ -397,7 +445,7 @@ cdef class Token:
         if self.vocab.vectors.size == 0 and self.doc.tensor.size != 0:
             return self.doc.tensor[self.i]
         else:
-            return self.vocab.get_vector(self.c.lex.orth)
+            return self.vocab.get_vector(Token.get_struct_attr(self.c, self.vocab.vectors.attr))
 
     @property
     def vector_norm(self):
@@ -451,50 +499,51 @@ cdef class Token:
             return self.doc.user_token_hooks["sent"](self)
         return self.doc[self.i : self.i+1].sent
 
-    property sent_start:
-        def __get__(self):
-            """Deprecated: use Token.is_sent_start instead."""
-            # Raising a deprecation warning here causes errors for autocomplete
-            # Handle broken backwards compatibility case: doc[0].sent_start
-            # was False.
-            if self.i == 0:
-                return False
-            else:
-                return self.c.sent_start
+    @property
+    def sent_start(self):
+        """Deprecated: use Token.is_sent_start instead."""
+        # Raising a deprecation warning here causes errors for autocomplete
+        # Handle broken backwards compatibility case: doc[0].sent_start
+        # was False.
+        if self.i == 0:
+            return False
+        else:
+            return self.c.sent_start
 
-        def __set__(self, value):
-            self.is_sent_start = value
+    @sent_start.setter
+    def sent_start(self, value):
+        self.is_sent_start = value
 
-    property is_sent_start:
+    @property
+    def is_sent_start(self):
         """A boolean value indicating whether the token starts a sentence.
         `None` if unknown. Defaults to `True` for the first token in the `Doc`.
 
         RETURNS (bool / None): Whether the token starts a sentence.
             None if unknown.
-
-        DOCS: https://spacy.io/api/token#is_sent_start
         """
-        def __get__(self):
-            if self.c.sent_start == 0:
-                return None
-            elif self.c.sent_start < 0:
-                return False
-            else:
-                return True
+        if self.c.sent_start == 0:
+            return None
+        elif self.c.sent_start < 0:
+            return False
+        else:
+            return True
 
-        def __set__(self, value):
-            if self.doc.is_parsed:
-                raise ValueError(Errors.E043)
-            if value is None:
-                self.c.sent_start = 0
-            elif value is True:
-                self.c.sent_start = 1
-            elif value is False:
-                self.c.sent_start = -1
-            else:
-                raise ValueError(Errors.E044.format(value=value))
+    @is_sent_start.setter
+    def is_sent_start(self, value):
+        if self.doc.has_annotation("DEP"):
+            raise ValueError(Errors.E043)
+        if value is None:
+            self.c.sent_start = 0
+        elif value is True:
+            self.c.sent_start = 1
+        elif value is False:
+            self.c.sent_start = -1
+        else:
+            raise ValueError(Errors.E044.format(value=value))
 
-    property is_sent_end:
+    @property
+    def is_sent_end(self):
         """A boolean value indicating whether the token ends a sentence.
         `None` if unknown. Defaults to `True` for the last token in the `Doc`.
 
@@ -503,18 +552,18 @@ cdef class Token:
 
         DOCS: https://spacy.io/api/token#is_sent_end
         """
-        def __get__(self):
-            if self.i + 1 == len(self.doc):
-                return True
-            elif self.doc[self.i+1].is_sent_start == None:
-                return None
-            elif self.doc[self.i+1].is_sent_start == True:
-                return True
-            else:
-                return False
+        if self.i + 1 == len(self.doc):
+            return True
+        elif self.doc[self.i+1].is_sent_start is None:
+            return None
+        elif self.doc[self.i+1].is_sent_start is True:
+            return True
+        else:
+            return False
 
-        def __set__(self, value):
-            raise ValueError(Errors.E196)
+    @is_sent_end.setter
+    def is_sent_end(self, value):
+        raise ValueError(Errors.E196)
 
     @property
     def lefts(self):
@@ -587,7 +636,7 @@ cdef class Token:
             yield from word.subtree
 
     @property
-    def left_edge(self):
+    def left_edge(self) -> int:
         """The leftmost token of this token's syntactic descendents.
 
         RETURNS (Token): The first token such that `self.is_ancestor(token)`.
@@ -595,7 +644,7 @@ cdef class Token:
         return self.doc[self.c.l_edge]
 
     @property
-    def right_edge(self):
+    def right_edge(self) -> int:
         """The rightmost token of this token's syntactic descendents.
 
         RETURNS (Token): The last token such that `self.is_ancestor(token)`.
@@ -633,97 +682,50 @@ cdef class Token:
             return False
         return any(ancestor.i == self.i for ancestor in descendant.ancestors)
 
-    property head:
+    def has_head(self):
+        """Check whether the token has annotated head information.
+        Return False when the head annotation is unset/missing.
+
+        RETURNS (bool): Whether the head annotation is valid or not.
+        """
+        return not Token.missing_head(self.c)
+
+    @property
+    def head(self):
         """The syntactic parent, or "governor", of this token.
+        If token.has_head() is `False`, this method will return itself.
 
         RETURNS (Token): The token predicted by the parser to be the head of
             the current token.
         """
-        def __get__(self):
+        if not self.has_head():
+            return self
+        else:
             return self.doc[self.i + self.c.head]
 
-        def __set__(self, Token new_head):
-            # This function sets the head of self to new_head and updates the
-            # counters for left/right dependents and left/right corner for the
-            # new and the old head
-            # Check that token is from the same document
-            if self.doc != new_head.doc:
-                raise ValueError(Errors.E191)
-            # Do nothing if old head is new head
-            if self.i + self.c.head == new_head.i:
-                return
-            cdef Token old_head = self.head
-            cdef int rel_newhead_i = new_head.i - self.i
-            # Is the new head a descendant of the old head
-            cdef bint is_desc = old_head.is_ancestor(new_head)
-            cdef int new_edge
-            cdef Token anc, child
-            # Update number of deps of old head
-            if self.c.head > 0:  # left dependent
-                old_head.c.l_kids -= 1
-                if self.c.l_edge == old_head.c.l_edge:
-                    # The token dominates the left edge so the left edge of
-                    # the head may change when the token is reattached, it may
-                    # not change if the new head is a descendant of the current
-                    # head.
-                    new_edge = self.c.l_edge
-                    # The new l_edge is the left-most l_edge on any of the
-                    # other dependents where the l_edge is left of the head,
-                    # otherwise it is the head
-                    if not is_desc:
-                        new_edge = old_head.i
-                        for child in old_head.children:
-                            if child == self:
-                                continue
-                            if child.c.l_edge < new_edge:
-                                new_edge = child.c.l_edge
-                        old_head.c.l_edge = new_edge
-                    # Walk up the tree from old_head and assign new l_edge to
-                    # ancestors until an ancestor already has an l_edge that's
-                    # further left
-                    for anc in old_head.ancestors:
-                        if anc.c.l_edge <= new_edge:
-                            break
-                        anc.c.l_edge = new_edge
-            elif self.c.head < 0:  # right dependent
-                old_head.c.r_kids -= 1
-                # Do the same thing as for l_edge
-                if self.c.r_edge == old_head.c.r_edge:
-                    new_edge = self.c.r_edge
-                    if not is_desc:
-                        new_edge = old_head.i
-                        for child in old_head.children:
-                            if child == self:
-                                continue
-                            if child.c.r_edge > new_edge:
-                                new_edge = child.c.r_edge
-                        old_head.c.r_edge = new_edge
-                    for anc in old_head.ancestors:
-                        if anc.c.r_edge >= new_edge:
-                            break
-                        anc.c.r_edge = new_edge
-            # Update number of deps of new head
-            if rel_newhead_i > 0:  # left dependent
-                new_head.c.l_kids += 1
-                # Walk up the tree from new head and set l_edge to self.l_edge
-                # until you hit a token with an l_edge further to the left
-                if self.c.l_edge < new_head.c.l_edge:
-                    new_head.c.l_edge = self.c.l_edge
-                    for anc in new_head.ancestors:
-                        if anc.c.l_edge <= self.c.l_edge:
-                            break
-                        anc.c.l_edge = self.c.l_edge
-            elif rel_newhead_i < 0:  # right dependent
-                new_head.c.r_kids += 1
-                # Do the same as for l_edge
-                if self.c.r_edge > new_head.c.r_edge:
-                    new_head.c.r_edge = self.c.r_edge
-                    for anc in new_head.ancestors:
-                        if anc.c.r_edge >= self.c.r_edge:
-                            break
-                        anc.c.r_edge = self.c.r_edge
-            # Set new head
-            self.c.head = rel_newhead_i
+    @head.setter
+    def head(self, Token new_head):
+        # This function sets the head of self to new_head and updates the
+        # counters for left/right dependents and left/right corner for the
+        # new and the old head
+        # Check that token is from the same document
+        if self.doc != new_head.doc:
+            raise ValueError(Errors.E191)
+        # Do nothing if old head is new head
+        if self.i + self.c.head == new_head.i:
+            return
+        # Find the widest l/r_edges of the roots of the two tokens involved
+        # to limit the number of tokens for set_children_from_heads
+        cdef Token self_root, new_head_root
+        self_root = ([self] + list(self.ancestors))[-1]
+        new_head_ancestors = list(new_head.ancestors)
+        new_head_root = new_head_ancestors[-1] if new_head_ancestors else new_head
+        start = self_root.c.l_edge if self_root.c.l_edge < new_head_root.c.l_edge else new_head_root.c.l_edge
+        end = self_root.c.r_edge if self_root.c.r_edge > new_head_root.c.r_edge else new_head_root.c.r_edge
+        # Set new head
+        self.c.head = new_head.i - self.i
+        # Adjust parse properties and sentence starts
+        set_children_from_heads(self.doc.c, start, end + 1)
 
     @property
     def conjuncts(self):
@@ -751,21 +753,23 @@ cdef class Token:
                     queue.append(child)
         return tuple([w for w in output if w.i != self.i])
 
-    property ent_type:
+    @property
+    def ent_type(self):
         """RETURNS (uint64): Named entity type."""
-        def __get__(self):
-            return self.c.ent_type
+        return self.c.ent_type
 
-        def __set__(self, ent_type):
-            self.c.ent_type = ent_type
+    @ent_type.setter
+    def ent_type(self, ent_type):
+        self.c.ent_type = ent_type
 
-    property ent_type_:
-        """RETURNS (unicode): Named entity type."""
-        def __get__(self):
-            return self.vocab.strings[self.c.ent_type]
+    @property
+    def ent_type_(self):
+        """RETURNS (str): Named entity type."""
+        return self.vocab.strings[self.c.ent_type]
 
-        def __set__(self, ent_type):
-            self.c.ent_type = self.vocab.strings.add(ent_type)
+    @ent_type_.setter
+    def ent_type_(self, ent_type):
+        self.c.ent_type = self.vocab.strings.add(ent_type)
 
     @property
     def ent_iob(self):
@@ -776,6 +780,10 @@ cdef class Token:
         """
         return self.c.ent_iob
 
+    @classmethod
+    def iob_strings(cls):
+        return IOB_STRINGS
+
     @property
     def ent_iob_(self):
         """IOB code of named entity tag. "B" means the token begins an entity,
@@ -783,55 +791,58 @@ cdef class Token:
         and "" means no entity tag is set. "B" with an empty ent_type
         means that the token is blocked from further processing by NER.
 
-        RETURNS (unicode): IOB code of named entity tag.
+        RETURNS (str): IOB code of named entity tag.
         """
-        iob_strings = ("", "I", "O", "B")
-        return iob_strings[self.c.ent_iob]
+        return self.iob_strings()[self.c.ent_iob]
 
-    property ent_id:
+    @property
+    def ent_id(self):
         """RETURNS (uint64): ID of the entity the token is an instance of,
             if any.
         """
-        def __get__(self):
-            return self.c.ent_id
+        return self.c.ent_id
 
-        def __set__(self, hash_t key):
-            self.c.ent_id = key
+    @ent_id.setter
+    def ent_id(self, hash_t key):
+        self.c.ent_id = key
 
-    property ent_id_:
-        """RETURNS (unicode): ID of the entity the token is an instance of,
+    @property
+    def ent_id_(self):
+        """RETURNS (str): ID of the entity the token is an instance of,
             if any.
         """
-        def __get__(self):
-            return self.vocab.strings[self.c.ent_id]
+        return self.vocab.strings[self.c.ent_id]
 
-        def __set__(self, name):
-            self.c.ent_id = self.vocab.strings.add(name)
+    @ent_id_.setter
+    def ent_id_(self, name):
+        self.c.ent_id = self.vocab.strings.add(name)
 
-    property ent_kb_id:
+    @property
+    def ent_kb_id(self):
         """RETURNS (uint64): Named entity KB ID."""
-        def __get__(self):
-            return self.c.ent_kb_id
+        return self.c.ent_kb_id
 
-        def __set__(self, attr_t ent_kb_id):
-            self.c.ent_kb_id = ent_kb_id
+    @ent_kb_id.setter
+    def ent_kb_id(self, attr_t ent_kb_id):
+        self.c.ent_kb_id = ent_kb_id
 
-    property ent_kb_id_:
-        """RETURNS (unicode): Named entity KB ID."""
-        def __get__(self):
-            return self.vocab.strings[self.c.ent_kb_id]
+    @property
+    def ent_kb_id_(self):
+        """RETURNS (str): Named entity KB ID."""
+        return self.vocab.strings[self.c.ent_kb_id]
 
-        def __set__(self, ent_kb_id):
-            self.c.ent_kb_id = self.vocab.strings.add(ent_kb_id)
+    @ent_kb_id_.setter
+    def ent_kb_id_(self, ent_kb_id):
+        self.c.ent_kb_id = self.vocab.strings.add(ent_kb_id)
 
     @property
     def whitespace_(self):
-        """RETURNS (unicode): The trailing whitespace character, if present."""
+        """RETURNS (str): The trailing whitespace character, if present."""
         return " " if self.c.spacy else ""
 
     @property
     def orth_(self):
-        """RETURNS (unicode): Verbatim text content (identical to
+        """RETURNS (str): Verbatim text content (identical to
             `Token.text`). Exists mostly for consistency with the other
             attributes.
         """
@@ -839,86 +850,98 @@ cdef class Token:
 
     @property
     def lower_(self):
-        """RETURNS (unicode): The lowercase token text. Equivalent to
+        """RETURNS (str): The lowercase token text. Equivalent to
             `Token.text.lower()`.
         """
         return self.vocab.strings[self.c.lex.lower]
 
-    property norm_:
-        """RETURNS (unicode): The token's norm, i.e. a normalised form of the
+    @property
+    def norm_(self):
+        """RETURNS (str): The token's norm, i.e. a normalised form of the
             token text. Usually set in the language's tokenizer exceptions or
             norm exceptions.
         """
-        def __get__(self):
-            return self.vocab.strings[self.norm]
+        return self.vocab.strings[self.norm]
 
-        def __set__(self, unicode norm_):
-            self.c.norm = self.vocab.strings.add(norm_)
+    @norm_.setter
+    def norm_(self, str norm_):
+        self.c.norm = self.vocab.strings.add(norm_)
 
     @property
     def shape_(self):
-        """RETURNS (unicode): Transform of the tokens's string, to show
+        """RETURNS (str): Transform of the token's string, to show
             orthographic features. For example, "Xxxx" or "dd".
         """
         return self.vocab.strings[self.c.lex.shape]
 
     @property
     def prefix_(self):
-        """RETURNS (unicode): A length-N substring from the start of the token.
+        """RETURNS (str): A length-N substring from the start of the token.
             Defaults to `N=1`.
         """
         return self.vocab.strings[self.c.lex.prefix]
 
     @property
     def suffix_(self):
-        """RETURNS (unicode): A length-N substring from the end of the token.
+        """RETURNS (str): A length-N substring from the end of the token.
             Defaults to `N=3`.
         """
         return self.vocab.strings[self.c.lex.suffix]
 
     @property
     def lang_(self):
-        """RETURNS (unicode): Language of the parent document's vocabulary,
+        """RETURNS (str): Language of the parent document's vocabulary,
             e.g. 'en'.
         """
         return self.vocab.strings[self.c.lex.lang]
 
-    property lemma_:
-        """RETURNS (unicode): The token lemma, i.e. the base form of the word,
+    @property
+    def lemma_(self):
+        """RETURNS (str): The token lemma, i.e. the base form of the word,
             with no inflectional suffixes.
         """
-        def __get__(self):
-            if self.c.lemma == 0:
-                return self.vocab.morphology.lemmatizer.lookup(self.orth_, orth=self.orth)
-            else:
-                return self.vocab.strings[self.c.lemma]
+        return self.vocab.strings[self.c.lemma]
 
-        def __set__(self, unicode lemma_):
-            self.c.lemma = self.vocab.strings.add(lemma_)
+    @lemma_.setter
+    def lemma_(self, str lemma_):
+        self.c.lemma = self.vocab.strings.add(lemma_)
 
-    property pos_:
-        """RETURNS (unicode): Coarse-grained part-of-speech tag."""
-        def __get__(self):
-            return parts_of_speech.NAMES[self.c.pos]
+    @property
+    def pos_(self):
+        """RETURNS (str): Coarse-grained part-of-speech tag."""
+        return parts_of_speech.NAMES[self.c.pos]
 
-        def __set__(self, pos_name):
-            self.c.pos = parts_of_speech.IDS[pos_name]
+    @pos_.setter
+    def pos_(self, pos_name):
+        if pos_name not in parts_of_speech.IDS:
+            raise ValueError(Errors.E1021.format(pp=pos_name))
+        self.c.pos = parts_of_speech.IDS[pos_name]
 
-    property tag_:
-        """RETURNS (unicode): Fine-grained part-of-speech tag."""
-        def __get__(self):
-            return self.vocab.strings[self.c.tag]
+    @property
+    def tag_(self):
+        """RETURNS (str): Fine-grained part-of-speech tag."""
+        return self.vocab.strings[self.c.tag]
 
-        def __set__(self, tag):
-            self.tag = self.vocab.strings.add(tag)
+    @tag_.setter
+    def tag_(self, tag):
+        self.tag = self.vocab.strings.add(tag)
 
-    property dep_:
-        """RETURNS (unicode): The syntactic dependency label."""
-        def __get__(self):
-            return self.vocab.strings[self.c.dep]
+    def has_dep(self):
+        """Check whether the token has annotated dep information.
+        Returns False when the dep label is unset/missing.
 
-        def __set__(self, unicode label):
-            self.c.dep = self.vocab.strings.add(label)
+        RETURNS (bool): Whether the dep label is valid or not.
+        """
+        return not Token.missing_dep(self.c)
+
+    @property
+    def dep_(self):
+        """RETURNS (str): The syntactic dependency label."""
+        return self.vocab.strings[self.c.dep]
+
+    @dep_.setter
+    def dep_(self, str label):
+        self.c.dep = self.vocab.strings.add(label)
 
     @property
     def is_oov(self):

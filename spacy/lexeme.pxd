@@ -1,12 +1,21 @@
-from .typedefs cimport attr_t, hash_t, flags_t, len_t, tag_t
-from .attrs cimport attr_id_t
-from .attrs cimport ID, ORTH, LOWER, NORM, SHAPE, PREFIX, SUFFIX, LENGTH, LANG
-
-from .structs cimport LexemeC
-from .strings cimport StringStore
-from .vocab cimport Vocab
-
 from numpy cimport ndarray
+
+from .attrs cimport (
+    ID,
+    LANG,
+    LENGTH,
+    LOWER,
+    NORM,
+    ORTH,
+    PREFIX,
+    SHAPE,
+    SUFFIX,
+    attr_id_t,
+)
+from .strings cimport StringStore
+from .structs cimport LexemeC
+from .typedefs cimport attr_t, flags_t, hash_t, len_t, tag_t
+from .vocab cimport Vocab
 
 
 cdef LexemeC EMPTY_LEXEME
@@ -18,11 +27,12 @@ cdef class Lexeme:
     cdef readonly attr_t orth
 
     @staticmethod
-    cdef inline Lexeme from_ptr(LexemeC* lex, Vocab vocab, int vector_length):
+    cdef inline Lexeme from_ptr(LexemeC* lex, Vocab vocab):
         cdef Lexeme self = Lexeme.__new__(Lexeme, vocab, lex.orth)
         self.c = lex
         self.vocab = vocab
         self.orth = lex.orth
+        return self
 
     @staticmethod
     cdef inline void set_struct_attr(LexemeC* lex, attr_id_t name, attr_t value) nogil:

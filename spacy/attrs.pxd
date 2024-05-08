@@ -1,6 +1,7 @@
 # Reserve 64 values for flag features
 from . cimport symbols
 
+
 cdef enum attr_id_t:
     NULL_ATTR
     IS_ALPHA
@@ -91,6 +92,7 @@ cdef enum attr_id_t:
 
     LANG
     ENT_KB_ID = symbols.ENT_KB_ID
+    MORPH
     ENT_ID = symbols.ENT_ID
 
     IDX
